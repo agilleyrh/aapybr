@@ -14,7 +14,7 @@ ansible-playbook -i inventory.yml playbooks/preupgrade_checks.yml
 if using vault
 ansible-playbook -i inventory.yml playbooks/preupgrade_checks.yml --ask-vault-pass
 
-#Additional Informaiton
+# Additional Informaiton
 The playbook intentionally does not perform destructive operations (except creating tar and pg_dump). It will not delete any DBs or modify system repos.
 
 All passwords and sensitive values should be stored in Ansible Vault (e.g., ansible-vault encrypt group_vars/all.yml) or supplied at runtime.
