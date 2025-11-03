@@ -1,0 +1,293 @@
+---
+- name: AAP pre-upgrade checks & backups (RPM and Containerized)
+  hosts: aap_targets
+  gather_facts: yes
+  become: true
+  vars_files:
+    - ../group_vars/all.yml   # adjust path as needed (or pass -e @vars)
+  pre_tasks:
+    - name: ensure backup base dir exists on managed host
+      file:
+        path: "{{ backup_base_dir }}/{{ inventory_hostname }}"
+        state: directory
+        mode: '0750'
+      tags: prep
+
+    - name: ensure fetch dir exists on control (when fetch_to_control true)
+      delegate_to: localhost
+      run_once: true
+      file:
+        path: "{{ control_fetch_dir }}"
+        state: directory
+        mode: '0750'
+      when: fetch_to_control | default(false)
+      tags: prep
+
+  tasks:
+    - name: Record run start timestamp
+      ansible.builtin.shell: date --utc +"%Y-%m-%dT%H:%M:%SZ"
+      register: run_start
+      changed_when: false
+      tags: info
+
+    - name: Gather installed package list (rpm)
+      ansible.builtin.command: rpm -qa
+      register: rpm_packages
+      changed_when: false
+      tags: collect
+
+    - name: Save rpm package list to file
+      ansible.builtin.copy:
+        content: "{{ rpm_packages.stdout }}"
+        dest: "{{ backup_base_dir }}/{{ inventory_hostname }}/rpm-packages-{{ ansible_date_time.date }}.txt"
+      tags: collect
+
+    - name: Gather DNF/YUM repo list
+      ansible.builtin.shell: |
+        if command -v dnf >/dev/null 2>&1; then
+          dnf repolist enabled
+        else
+          yum repolist enabled
+        fi
+      register: repolist
+      changed_when: false
+      tags: collect
+
+    - name: Save repo list to file
+      ansible.builtin.copy:
+        content: "{{ repolist.stdout }}"
+        dest: "{{ backup_base_dir }}/{{ inventory_hostname }}/repolist-{{ ansible_date_time.date }}.txt"
+      tags: collect
+
+    - name: Check subscription-manager status (if present)
+      ansible.builtin.command: subscription-manager status
+      register: sub_status
+      failed_when: false
+      changed_when: false
+      tags: collect
+
+    - name: Save subscription-manager status
+      ansible.builtin.copy:
+        content: "{{ sub_status.stdout | default('subscription-manager not present or returned empty') }}"
+        dest: "{{ backup_base_dir }}/{{ inventory_hostname }}/subscription-status-{{ ansible_date_time.date }}.txt"
+      tags: collect
+
+    - name: Check OS distribution and version (record)
+      set_fact:
+        os_info: "{{ ansible_distribution }} {{ ansible_distribution_major_version }}.{{ ansible_distribution_release | default('') }}"
+      tags: collect
+
+    - name: Save OS info to file
+      ansible.builtin.copy:
+        content: "{{ os_info }}\nKernel: {{ ansible_kernel }}\nPython: {{ ansible_python.version }}\n"
+        dest: "{{ backup_base_dir }}/{{ inventory_hostname }}/os-info-{{ ansible_date_time.date }}.txt"
+      tags: collect
+
+    - name: Detect presence of Event-Driven Ansible (EDA) process files and packages
+      ansible.builtin.shell: |
+        if rpm -qa | grep -i eda >/dev/null 2>&1; then
+          rpm -qa | grep -i eda
+        else
+          echo "no eda rpm found"
+        fi
+      register: eda_rpm_check
+      failed_when: false
+      changed_when: false
+      tags: eda
+
+    - name: Save EDA detection output
+      ansible.builtin.copy:
+        content: "{{ eda_rpm_check.stdout }}"
+        dest: "{{ backup_base_dir }}/{{ inventory_hostname }}/eda-detection-{{ ansible_date_time.date }}.txt"
+      tags: eda
+
+    - name: Search for EDA related docker/podman containers
+      ansible.builtin.shell: |
+        if command -v podman >/dev/null 2>&1; then
+          podman ps --format '{{'{{'}}.Names{{'}}'}}' | grep -i eda || true
+        elif command -v docker >/dev/null 2>&1; then
+          docker ps --format '{{'{{'}}.Names{{'}}'}}' | grep -i eda || true
+        else
+          echo "no container runtime found"
+        fi
+      register: eda_container_check
+      failed_when: false
+      changed_when: false
+      tags: eda
+
+    - name: Save EDA container check
+      ansible.builtin.copy:
+        content: "{{ eda_container_check.stdout }}"
+        dest: "{{ backup_base_dir }}/{{ inventory_hostname }}/eda-container-detection-{{ ansible_date_time.date }}.txt"
+      tags: eda
+
+    - name: Find custom Ansible plugin directories (common paths)
+      ansible.builtin.find:
+        paths:
+          - /var/lib/awx
+          - /var/lib/automation-controller
+          - /usr/share/ansible
+          - /etc/ansible
+          - /opt
+        patterns: "*.py"
+        recurse: yes
+        size: 10000000
+      register: plugin_files
+      failed_when: false
+      tags: plugins
+
+    - name: Save plugin list (top 200) to file
+      ansible.builtin.copy:
+        content: "{{ plugin_files.files | map(attribute='path') | list | join('\n') }}"
+        dest: "{{ backup_base_dir }}/{{ inventory_hostname }}/found-plugin-files-{{ ansible_date_time.date }}.txt"
+      when: plugin_files is defined
+      tags: plugins
+
+    - name: Archive configured directories (tar.gz)
+      ansible.builtin.shell: |
+        set -e
+        TARFILE="{{ backup_base_dir }}/{{ inventory_hostname }}/config-archive-{{ ansible_date_time.date }}.tgz"
+        tar -czf "$TARFILE" {{ archive_dirs | join(' ') }} 2>/dev/null || true
+        echo "$TARFILE"
+      args:
+        executable: /bin/bash
+      register: archive_out
+      failed_when: false
+      tags: backup
+
+    - name: Record archive location
+      ansible.builtin.copy:
+        content: "Archive created: {{ archive_out.stdout | default('none') }}\n"
+        dest: "{{ backup_base_dir }}/{{ inventory_hostname }}/archive-info-{{ ansible_date_time.date }}.txt"
+      tags: backup
+
+    - name: Ensure pg_dump is present on host (check)
+      ansible.builtin.command: which pg_dump
+      register: pg_dump_check
+      failed_when: false
+      changed_when: false
+      tags: db
+
+    - name: Execute postgres backup using pg_dump (if enabled)
+      ansible.builtin.shell: |
+        set -e
+        BACKUP_DIR="{{ backup_base_dir }}/{{ inventory_hostname }}"
+        OUTFILE="${BACKUP_DIR}/pgdump-{{ pg.dbname }}-{{ ansible_date_time.date }}.dump"
+        PGPASSFILE="${BACKUP_DIR}/.pgpass"
+        # create .pgpass if pg_password is supplied (vault recommended)
+        {% if pg.pg_password is defined %}
+        echo "{{ pg.host }}:{{ pg.port }}:{{ pg.dbname }}:{{ pg.db_user }}:{{ pg.pg_password }}" > $PGPASSFILE
+        chmod 0600 $PGPASSFILE
+        export PGPASSFILE=$PGPASSFILE
+        {% endif %}
+        sudo -u {{ pg.db_user }} pg_dump -Fc -h {{ pg.host }} -p {{ pg.port }} -U {{ pg.db_user }} {{ pg.dbname }} -f "$OUTFILE" || exit 2
+        echo "$OUTFILE"
+      args:
+        executable: /bin/bash
+      register: pgdump_out
+      failed_when: pgdump_out.rc != 0 and pgdump_out.rc != 2
+      when: pg.enabled | default(false)
+      tags: db
+
+    - name: Save pg_dump stdout to file
+      ansible.builtin.copy:
+        content: "{{ pgdump_out.stdout | default('no dump created') }}"
+        dest: "{{ backup_base_dir }}/{{ inventory_hostname }}/pgdump-info-{{ ansible_date_time.date }}.txt"
+      when: pg.enabled | default(false)
+      tags: db
+
+    - name: List container images (podman/docker) if containerized
+      ansible.builtin.shell: |
+        if command -v podman >/dev/null 2>&1; then
+          podman images --format "{{'{{'}}.Repository{{'}}'}}:{{'{{'}}.Tag{{'}}'}} {{'{{'}}.ID{{'}}'}}"
+        elif command -v docker >/dev/null 2>&1; then
+          docker images --format "{{'{{'}}.Repository{{'}}'}}:{{'{{'}}.Tag{{'}}'}} {{'{{'}}.ID{{'}}'}}"
+        else
+          echo "no-container-runtime"
+        fi
+      register: images_list
+      changed_when: false
+      failed_when: false
+      tags: containers
+
+    - name: Save container images list
+      ansible.builtin.copy:
+        content: "{{ images_list.stdout | default('no images') }}"
+        dest: "{{ backup_base_dir }}/{{ inventory_hostname }}/container-images-{{ ansible_date_time.date }}.txt"
+      tags: containers
+
+    - name: Test registry connectivity (optional, when registry_check_url provided)
+      ansible.builtin.uri:
+        url: "{{ container.registry_check_url }}"
+        method: HEAD
+        return_content: no
+        timeout: 10
+      register: registry_check
+      failed_when: false
+      changed_when: false
+      tags: containers
+
+    - name: Save registry connectivity output
+      ansible.builtin.copy:
+        content: "Registry check: status={{ registry_check.status }}; msg={{ registry_check.msg | default('') }}\n"
+        dest: "{{ backup_base_dir }}/{{ inventory_hostname }}/registry-check-{{ ansible_date_time.date }}.txt"
+      tags: containers
+
+    - name: Try to run awx-manage print_settings (if available)
+      ansible.builtin.shell: |
+        if command -v awx-manage >/dev/null 2>&1; then
+          awx-manage print_settings
+        else
+          echo "awx-manage not found"
+        fi
+      register: awx_manage
+      failed_when: false
+      changed_when: false
+      tags: export
+
+    - name: Save awx-manage output
+      ansible.builtin.copy:
+        content: "{{ awx_manage.stdout }}"
+        dest: "{{ backup_base_dir }}/{{ inventory_hostname }}/awx-manage-{{ ansible_date_time.date }}.txt"
+      tags: export
+
+    - name: Create a small JSON summary file of collected artifacts
+      ansible.builtin.copy:
+        content: |
+          {
+            "host": "{{ inventory_hostname }}",
+            "os": "{{ os_info }}",
+            "rpm_packages_file": "{{ backup_base_dir }}/{{ inventory_hostname }}/rpm-packages-{{ ansible_date_time.date }}.txt",
+            "repo_list_file": "{{ backup_base_dir }}/{{ inventory_hostname }}/repolist-{{ ansible_date_time.date }}.txt",
+            "eda_detection_file": "{{ backup_base_dir }}/{{ inventory_hostname }}/eda-detection-{{ ansible_date_time.date }}.txt",
+            "plugin_list_file": "{{ backup_base_dir }}/{{ inventory_hostname }}/found-plugin-files-{{ ansible_date_time.date }}.txt",
+            "archive_file": "{{ archive_out.stdout | default('') }}",
+            "pgdump_file": "{{ pgdump_out.stdout | default('') }}"
+          }
+        dest: "{{ backup_base_dir }}/{{ inventory_hostname }}/summary-{{ ansible_date_time.date }}.json"
+      tags: summary
+
+  post_tasks:
+    - name: Fetch artifacts to control node (if enabled)
+      fetch:
+        src: "{{ backup_base_dir }}/{{ inventory_hostname }}/"
+        dest: "{{ control_fetch_dir }}/{{ inventory_hostname }}/"
+        flat: no
+      when: fetch_to_control | default(false)
+      tags: fetch
+
+    - name: Record run end timestamp (control)
+      delegate_to: localhost
+      run_once: true
+      ansible.builtin.shell: date --utc +"%Y-%m-%dT%H:%M:%SZ"
+      register: run_end
+      changed_when: false
+      tags: info
+
+    - name: Print summary to play recap
+      ansible.builtin.debug:
+        msg:
+          - "Host {{ inventory_hostname }}: artifacts stored at {{ backup_base_dir }}/{{ inventory_hostname }}"
+          - "If fetch_to_control enabled, artifacts located at {{ control_fetch_dir }}/{{ inventory_hostname }}"
+      run_once: false
+      tags: summary
