@@ -7,13 +7,13 @@ The playbook is focused on RPM and containerized hosts. It does not perform the 
 Security note: This playbook runs potentially sensitive commands (DB dumps, tar of config dirs). Use Ansible Vault for secrets (DB password), restrict output storage to secure backup locations, and run in accordance with bank policies.
 
 
-How to run the playbook (example)
+# How to run the playbook (example)
 Create an inventory with controller hosts and DB host groups.
 Create group_vars/all.yml with your values and place secrets in Ansible Vault (e.g., pg.pg_password).
 From the control host run:
 
 ansible-playbook -i inventory.yml playbooks/preupgrade_checks.yml
-# if using vault
+if using vault
 ansible-playbook -i inventory.yml playbooks/preupgrade_checks.yml --ask-vault-pass
 
 
