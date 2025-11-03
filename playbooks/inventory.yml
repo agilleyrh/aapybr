@@ -1,0 +1,14 @@
+[aap_targets]
+aap-controller-01.example.com
+aap-controller-02.example.com
+
+[db_hosts]
+postgres-primary.example.com
+
+[container_hosts]
+aap-controller-01.example.com
+aap-controller-02.example.com
+
+[all:vars]
+ansible_user=ansible
+ansible_become=true
