@@ -1,0 +1,25 @@
+# group_vars/all.yml
+backup_base_dir: /var/backups/aap_preupgrade
+archive_dirs:
+  - /etc/ansible
+  - /var/lib/awx
+  - /etc/pki
+  - /root/.ansible
+pg:
+  enabled: true
+  host: postgres-primary.example.com
+  port: 5432
+  dbname: automation_controller
+  db_user: postgres
+  # pg_password should be stored in ansible-vault and referenced here
+  # pg_password: !vault |
+  #   $ANSIBLE_VAULT;1.1;AES256...
+container:
+  enabled: true           # set true if containerized hosts exist
+  runtime: podman         # or docker
+  registry_check_url: https://registry.redhat.io
+  images_to_mirror:        # list images to mirror; can be empty if only listing current images
+    - registry.redhat.io/ansible-automation-platform-22/automation-controller:2.6
+    - registry.redhat.io/ansible-automation-platform-22/automation-ui:2.6
+fetch_to_control: true     # whether to fetch generated artifacts to control node
+control_fetch_dir: /srv/aap_preupgrade_artifacts
