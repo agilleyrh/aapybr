@@ -19,7 +19,7 @@ container:
   runtime: podman         # or docker
   registry_check_url: https://registry.redhat.io
   images_to_mirror:        # list images to mirror; can be empty if only listing current images
-    - registry.redhat.io/ansible-automation-platform-22/automation-controller:2.6
-    - registry.redhat.io/ansible-automation-platform-22/automation-ui:2.6
+    - registry.redhat.io/ansible-automation-platform-26/automation-controller:2.6
+    - registry.redhat.io/ansible-automation-platform-26/automation-ui:2.6
 fetch_to_control: true     # whether to fetch generated artifacts to control node
 control_fetch_dir: /srv/aap_preupgrade_artifacts
